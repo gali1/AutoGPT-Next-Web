@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useState, useEffect } from "react";
 import { FaCopy } from "react-icons/fa";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -25,6 +25,12 @@ const MarkdownRenderer = ({ children }) => (
 
 const CustomPre = ({ children }: { children: ReactNode }) => {
   const [isCopied, setIsCopied] = useState(false);
+  const [isClient, setIsClient] = useState(false);
+
+  // Set isClient to true when component mounts in the browser
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
 
   const code = React.Children.toArray(children).find(isValidCustomCodeBlock);
 
@@ -34,27 +40,55 @@ const CustomPre = ({ children }: { children: ReactNode }) => {
       : "";
 
   const handleCopyClick = useCallback(() => {
-    if (code && React.isValidElement(code)) {
+    if (code && React.isValidElement(code) && isClient) {
       const codeString = extractTextFromNode(code.props.children);
-      void navigator.clipboard.writeText(codeString);
+
+      // Check if navigator.clipboard is available
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        navigator.clipboard.writeText(codeString).catch(err => {
+          console.error('Failed to copy text: ', err);
+        });
+      } else {
+        // Fallback copy method
+        const textArea = document.createElement('textarea');
+        textArea.value = codeString;
+        textArea.style.position = 'fixed';  // Avoid scrolling to bottom
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+
+        try {
+          document.execCommand('copy');
+        } catch (err) {
+          console.error('Fallback: Failed to copy text: ', err);
+        }
+
+        document.body.removeChild(textArea);
+      }
+
       setIsCopied(true);
       setTimeout(() => {
         setIsCopied(false);
       }, 2000);
     }
-  }, [code]);
+  }, [code, isClient]);
+
+  // Only render the copy button on the client
+  const copyButton = isClient ? (
+    <button
+      onClick={handleCopyClick}
+      className="flex items-center gap-2 rounded px-2 py-1 hover:bg-zinc-600 focus:outline-none"
+    >
+      <FaCopy />
+      {isCopied ? "Copied!" : "Copy Code"}
+    </button>
+  ) : null;
 
   return (
     <div className="mb-4 flex flex-col ">
       <div className="flex w-full items-center justify-between rounded-t-lg bg-zinc-800 p-1 px-4 text-white">
         <div>{language.charAt(0).toUpperCase() + language.slice(1)}</div>
-        <button
-          onClick={handleCopyClick}
-          className="flex items-center gap-2 rounded px-2 py-1 hover:bg-zinc-600 focus:outline-none"
-        >
-          <FaCopy />
-          {isCopied ? "Copied!" : "Copy Code"}
-        </button>
+        {copyButton}
       </div>
       <pre className="rounded-t-[0]">{children}</pre>
     </div>

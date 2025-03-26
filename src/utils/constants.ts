@@ -1,6 +1,11 @@
-export const GPT_35_TURBO = "gpt-3.5-turbo" as const;
-export const GPT_4 = "gpt-4" as const;
-export const GPT_MODEL_NAMES = [GPT_35_TURBO, GPT_4];
+export const GPT_35_TURBO = "llama3-8b-8192" as const;
+export const GPT_4 = "llama3-70b-8192" as const;
+export const GPT_MODEL_NAMES = [
+  "llama3-8b-8192",
+  "llama3-70b-8192",
+  "mixtral-8x7b-32768",
+  "gemma-7b-it",
+];
 
 export const DEFAULT_MAX_LOOPS_FREE = 4 as const;
 export const DEFAULT_MAX_LOOPS_PAID = 16 as const;

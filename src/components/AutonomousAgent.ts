@@ -68,7 +68,7 @@ class AutonomousAgent {
     customLanguage: string,
     guestSettings: GuestSettings,
     session?: Session,
-    playbackControl?: AgentPlaybackControl
+    playbackControl?: AgentPlaybackControl,
   ) {
     this.name = name;
     this.goal = goal;
@@ -102,17 +102,35 @@ class AutonomousAgent {
     const { isGuestMode, isValidGuest } = this.guestSettings;
     if (isGuestMode && !isValidGuest && !this.modelSettings.customApiKey) {
       this.sendErrorMessage(
-        `${i18n?.t("errors.invalid-guest-key", { ns: "chat" })}`
+        `${i18n?.t("errors.invalid-guest-key", { ns: "chat" })}`,
       );
       this.stopAgent();
       return;
     }
+
     this.sendGoalMessage();
     this.sendThinkingMessage();
 
+    // Optionally test connection before proceeding
+    if (
+      this.shouldRunClientSide() &&
+      !process.env.NEXT_PUBLIC_FF_MOCK_MODE_ENABLED
+    ) {
+      try {
+        await testConnection(this.modelSettings);
+      } catch (e) {
+        console.error("Connection test failed:", e);
+        this.sendErrorMessage(getMessageFromError(e));
+        this.shutdown();
+        return;
+      }
+    }
+
     // Initialize by getting taskValues
     try {
+      console.log("Getting initial tasks for goal:", this.goal);
       const taskValues = await this.getInitialTasks();
+
       for (const value of taskValues) {
         await new Promise((r) => setTimeout(r, TIMOUT_SHORT));
         const task: Task = {
@@ -124,7 +142,7 @@ class AutonomousAgent {
         this.sendMessage(task);
       }
     } catch (e) {
-      console.log(e);
+      console.error("Error getting initial tasks:", e);
       this.sendErrorMessage(getMessageFromError(e));
       this.shutdown();
       return;
@@ -169,18 +187,37 @@ class AutonomousAgent {
     // If enabled, analyze what tool to use
     if (useAgentStore.getState().isWebSearchEnabled) {
       // Analyze how to execute a task: Reason, web search, other tools...
-      analysis = await this.analyzeTask(currentTask.value);
-      this.sendAnalysisMessage(analysis, currentTask.taskId);
+      try {
+        analysis = await this.analyzeTask(currentTask.value);
+        this.sendAnalysisMessage(analysis, currentTask.taskId);
+      } catch (e) {
+        console.error("Error analyzing task:", e);
+        this.sendErrorMessage(getMessageFromError(e));
+        // Continue with default reasoning
+      }
     }
 
-    const result = await this.executeTask(currentTask.value, analysis);
-    this.sendMessage({
-      ...currentTask,
-      info: result,
-      status: TASK_STATUS_COMPLETED,
-    });
+    // Execute the task
+    let result;
+    try {
+      result = await this.executeTask(currentTask.value, analysis);
+      this.sendMessage({
+        ...currentTask,
+        info: result,
+        status: TASK_STATUS_COMPLETED,
+      });
 
-    this.completedTasks.push(currentTask.value || "");
+      this.completedTasks.push(currentTask.value || "");
+    } catch (e) {
+      console.error("Error executing task:", e);
+      this.sendErrorMessage(getMessageFromError(e));
+      this.sendMessage({
+        ...currentTask,
+        info: "Failed to complete task.",
+        status: TASK_STATUS_COMPLETED,
+      });
+      this.completedTasks.push(currentTask.value || "");
+    }
 
     // Wait before adding tasks
     await new Promise((r) => setTimeout(r, TIMEOUT_LONG));
@@ -210,9 +247,9 @@ class AutonomousAgent {
         this.sendMessage({ ...currentTask, status: TASK_STATUS_FINAL });
       }
     } catch (e) {
-      console.log(e);
+      console.error("Error adding additional tasks:", e);
       this.sendErrorMessage(
-        `${i18n?.t("errors.adding-additional-task", { ns: "chat" })}`
+        `${i18n?.t("errors.adding-additional-task", { ns: "chat" })}`,
       );
       this.sendMessage({ ...currentTask, status: TASK_STATUS_FINAL });
     }
@@ -251,14 +288,10 @@ class AutonomousAgent {
 
   async getInitialTasks(): Promise<string[]> {
     if (this.shouldRunClientSide()) {
-      //FIXME
-      // if (!env.NEXT_PUBLIC_FF_MOCK_MODE_ENABLED) {
-      //   await testConnection(this.modelSettings);
-      // }
       return await AgentService.startGoalAgent(
         this.modelSettings,
         this.goal,
-        this.customLanguage
+        this.customLanguage,
       );
     }
 
@@ -275,7 +308,7 @@ class AutonomousAgent {
 
   async getAdditionalTasks(
     currentTask: string,
-    result: string
+    result: string,
   ): Promise<string[]> {
     const taskValues = this.getRemainingTasks().map((task) => task.value);
 
@@ -287,7 +320,7 @@ class AutonomousAgent {
         currentTask,
         result,
         this.completedTasks,
-        this.customLanguage
+        this.customLanguage,
       );
     }
 
@@ -310,7 +343,7 @@ class AutonomousAgent {
       return await AgentService.analyzeTaskAgent(
         this.modelSettings,
         this.goal,
-        task
+        task,
       );
     }
 
@@ -333,7 +366,7 @@ class AutonomousAgent {
         this.goal,
         task,
         analysis,
-        this.customLanguage
+        this.customLanguage,
       );
     }
 
@@ -357,7 +390,7 @@ class AutonomousAgent {
 
       if (axios.isAxiosError(e) && e.response?.status === 429) {
         this.sendErrorMessage(
-          `${i18n?.t("errors.rate-limit", { ns: "chat" })}`
+          `${i18n?.t("errors.rate-limit", { ns: "chat" })}`,
         );
       }
 
@@ -465,22 +498,46 @@ class AutonomousAgent {
 
 const testConnection = async (modelSettings: ModelSettings) => {
   // A dummy connection to see if the key is valid
-  // Can't use LangChain / OpenAI libraries to test because they have retries in place
-  return await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: modelSettings.customModelName,
-      messages: [{ role: "user", content: "Say this is a test" }],
-      max_tokens: 7,
-      temperature: 0,
-    },
-    {
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${modelSettings.customApiKey ?? ""}`,
+  try {
+    // Test with a simple request to Groq API
+    console.log("Testing connection to Groq API...");
+    const modelName = modelSettings.customModelName;
+    console.log(`Using model: ${modelName}`);
+
+    return await axios.post(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        model: modelName,
+        messages: [{ role: "user", content: "Say this is a test" }],
+        max_tokens: 7,
+        temperature: 0,
       },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${modelSettings.customApiKey ?? ""}`,
+        },
+      }
+    );
+  } catch (error) {
+    console.error("Error testing Groq connection:", error);
+
+    if (axios.isAxiosError(error)) {
+      console.error("API Error Details:", {
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data
+      });
+
+      // Log the specific error message from Groq if available
+      const responseData = error.response?.data as any;
+      if (responseData?.error?.message) {
+        console.error("Groq API Error:", responseData.error.message);
+      }
     }
-  );
+
+    throw error;
+  }
 };
 
 const getMessageFromError = (e: unknown) => {
@@ -488,11 +545,34 @@ const getMessageFromError = (e: unknown) => {
 
   if (axios.isAxiosError(e)) {
     const axiosError = e;
-    if (axiosError.response?.status === 429) {
-      message = `${i18n?.t("errors.accessing-using-apis", { ns: "chat" })}`;
+    console.error("Axios error details:", {
+      status: axiosError.response?.status,
+      statusText: axiosError.response?.statusText,
+      data: axiosError.response?.data,
+    });
+
+    // Check for Groq-specific account errors
+    const responseData = axiosError.response?.data as any;
+    if (responseData?.error?.code === "organization_restricted") {
+      return `ERROR: Your Groq account has been restricted. Please contact Groq support at help@groq.com to resolve this issue.`;
     }
-    if (axiosError.response?.status === 404) {
-      message = `${i18n?.t("errors.accessing-gtp4", { ns: "chat" })}`;
+
+    if (axiosError.response?.status === 429) {
+      message = `${i18n?.t("errors.rate-limit-exceeded", { ns: "chat" })}`;
+    }
+    else if (axiosError.response?.status === 404) {
+      message = `${i18n?.t("errors.model-not-found", { ns: "chat" })}`;
+    }
+    else if (axiosError.response?.status === 401) {
+      message = `${i18n?.t("errors.invalid-api-key", { ns: "chat" })}`;
+    }
+    else if (axiosError.response?.status === 400) {
+      // Try to get more specific error information from the response
+      if (responseData?.error?.message) {
+        message = `Error from Groq API: ${responseData.error.message}`;
+      } else {
+        message = `${i18n?.t("errors.bad-request", { ns: "chat" })}`;
+      }
     }
   } else {
     message = `${i18n?.t("errors.initial-tasks", { ns: "chat" })}`;

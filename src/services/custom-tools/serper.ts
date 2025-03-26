@@ -1,7 +1,8 @@
 import { Tool } from "langchain/tools";
 import type { ModelSettings } from "../../utils/types";
-import { LLMChain } from "langchain/chains";
 import { createModel, summarizeSearchSnippets } from "../../utils/prompts";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+import { RunnableSequence } from "@langchain/core/runnables";
 
 /**
  * Wrapper around Serper adapted from LangChain: https://github.com/hwchase17/langchainjs/blob/main/langchain/src/tools/serper.ts
@@ -28,81 +29,143 @@ export class Serper extends Tool {
     this.goal = goal;
     if (!this.key) {
       throw new Error(
-        "Serper API key not set. You can set it as SERPER_API_KEY in your .env file, or pass it to Serper."
+        "Serper API key not set. You can set it as SERP_API_KEY in your .env file, or pass it to Serper."
       );
     }
   }
 
   /** @ignore */
   async _call(input: string) {
-    const res = await this.callSerper(input);
-    const searchResult: SearchResult = (await res.json()) as SearchResult;
+    try {
+      const res = await this.callSerper(input);
+      const searchResult = await this.safeParseJSON(res);
 
-    // Link means it is a snippet from a website and should not be viewed as a final answer
-    if (searchResult.answerBox && !searchResult.answerBox.link) {
-      const answerValues: string[] = [];
-      if (searchResult.answerBox.title) {
-        answerValues.push(searchResult.answerBox.title);
+      if (!searchResult) {
+        return "Error: Could not parse search results.";
       }
 
-      if (searchResult.answerBox.answer) {
-        answerValues.push(searchResult.answerBox.answer);
+      // Link means it is a snippet from a website and should not be viewed as a final answer
+      if (searchResult.answerBox && !searchResult.answerBox.link) {
+        const answerValues: string[] = [];
+        if (searchResult.answerBox.title) {
+          answerValues.push(searchResult.answerBox.title);
+        }
+
+        if (searchResult.answerBox.answer) {
+          answerValues.push(searchResult.answerBox.answer);
+        }
+
+        if (searchResult.answerBox.snippet) {
+          answerValues.push(searchResult.answerBox.snippet);
+        }
+
+        return answerValues.join("\n");
       }
 
-      if (searchResult.answerBox.snippet) {
-        answerValues.push(searchResult.answerBox.snippet);
+      if (searchResult.sportsResults?.game_spotlight) {
+        return searchResult.sportsResults.game_spotlight;
       }
 
-      return answerValues.join("\n");
+      if (searchResult.knowledgeGraph?.description) {
+        // TODO: use Title description, attributes
+        return searchResult.knowledgeGraph.description;
+      }
+
+      if (searchResult.organic?.[0]?.snippet) {
+        const snippets = this.safeExtractSnippets(searchResult);
+        const summary = await this.summarizeSnippets(input, snippets);
+        const resultsToLink = searchResult.organic?.slice(0, 3) || [];
+        const links = resultsToLink.map((result) => result.link || "");
+
+        return `${summary}\n\nLinks:\n${links
+          .map((link) => `- ${link}`)
+          .join("\n")}`;
+      }
+
+      return "No good search result found";
+    } catch (error) {
+      console.error("Error in Serper _call:", error);
+      return "Error occurred during search. Please try again with a different query.";
     }
+  }
 
-    if (searchResult.sportsResults?.game_spotlight) {
-      return searchResult.sportsResults.game_spotlight;
+  private safeParseJSON(response: Response): Promise<SearchResult | null> {
+    return response.json().catch(err => {
+      console.error("Error parsing JSON from Serper:", err);
+      return null;
+    });
+  }
+
+  private safeExtractSnippets(searchResult: SearchResult): string[] {
+    try {
+      if (!searchResult.organic || !Array.isArray(searchResult.organic)) {
+        return [];
+      }
+      return searchResult.organic
+        .filter(result => result && typeof result === 'object')
+        .map(result => result.snippet || "")
+        .filter(snippet => snippet);
+    } catch (error) {
+      console.error("Error extracting snippets:", error);
+      return [];
     }
-
-    if (searchResult.knowledgeGraph?.description) {
-      // TODO: use Title description, attributes
-      return searchResult.knowledgeGraph.description;
-    }
-
-    if (searchResult.organic?.[0]?.snippet) {
-      const snippets = searchResult.organic.map((result) => result.snippet);
-      const summary = await summarizeSnippets(
-        this.modelSettings,
-        this.goal,
-        input,
-        snippets
-      );
-      const resultsToLink = searchResult.organic.slice(0, 3);
-      const links = resultsToLink.map((result) => result.link);
-
-      return `${summary}\n\nLinks:\n${links
-        .map((link) => `- ${link}`)
-        .join("\n")}`;
-    }
-
-    return "No good search result found";
   }
 
   async callSerper(input: string) {
-    const options = {
-      method: "POST",
-      headers: {
-        "X-API-KEY": this.key,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        q: input,
-      }),
-    };
+    try {
+      const options = {
+        method: "POST",
+        headers: {
+          "X-API-KEY": this.key,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          q: input,
+        }),
+      };
 
-    const res = await fetch("https://google.serper.dev/search", options);
+      const res = await fetch("https://google.serper.dev/search", options);
 
-    if (!res.ok) {
-      console.error(`Got ${res.status} error from serper: ${res.statusText}`);
+      if (!res.ok) {
+        console.error(`Got ${res.status} error from serper: ${res.statusText}`);
+      }
+
+      return res;
+    } catch (error) {
+      console.error("Error calling Serper API:", error);
+      throw error;
     }
+  }
 
-    return res;
+  private async summarizeSnippets(
+    query: string,
+    snippets: string[]
+  ): Promise<string> {
+    try {
+      if (!snippets || snippets.length === 0) {
+        return "No relevant information found.";
+      }
+
+      const model = createModel(this.modelSettings);
+      const outputParser = new StringOutputParser();
+
+      const chain = RunnableSequence.from([
+        summarizeSearchSnippets,
+        model,
+        outputParser,
+      ]);
+
+      const response = await chain.invoke({
+        goal: this.goal,
+        query,
+        snippets: snippets.join("\n\n"),
+      });
+
+      return response ? response.toString() : "No summary available.";
+    } catch (error) {
+      console.error("Error summarizing snippets:", error);
+      return "Error creating summary from search results.";
+    }
   }
 }
 
@@ -144,20 +207,3 @@ interface OrganicResult {
 interface RelatedSearch {
   query: string;
 }
-
-const summarizeSnippets = async (
-  modelSettings: ModelSettings,
-  goal: string,
-  query: string,
-  snippets: string[]
-) => {
-  const completion = await new LLMChain({
-    llm: createModel(modelSettings),
-    prompt: summarizeSearchSnippets,
-  }).call({
-    goal,
-    query,
-    snippets,
-  });
-  return completion.text as string;
-};

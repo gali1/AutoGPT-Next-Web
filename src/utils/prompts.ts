@@ -1,60 +1,146 @@
-import { OpenAI } from "langchain/llms/openai";
-import { PromptTemplate } from "langchain/prompts";
+import { ChatGroq } from "@langchain/groq";
+import { ChatPromptTemplate } from "@langchain/core/prompts";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+import { RunnableSequence } from "@langchain/core/runnables";
+import { withRetry } from "./error-recovery";
 import type { ModelSettings } from "./types";
 import { GPT_35_TURBO } from "./constants";
 
 const getServerSideKey = (): string => {
-  const keys: string[] = (process.env.OPENAI_API_KEY || "")
-    .split(",")
-    .map((key) => key.trim())
-    .filter((key) => key.length);
+  const keys: string[] =
+    "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"
+      .split(",")
+      .map((key) => key.trim())
+      .filter((key) => key.length);
 
   return keys[Math.floor(Math.random() * keys.length)] || "";
 };
 
 export const createModel = (settings: ModelSettings) => {
-  let _settings: ModelSettings | undefined = settings;
-  if (!settings.customApiKey) {
-    _settings = undefined;
+  try {
+    let _settings: ModelSettings | undefined = settings;
+    if (!settings.customApiKey) {
+      _settings = undefined;
+    }
+
+    // Define the basic options that are definitely supported
+    const options: Record<string, any> = {
+      apiKey: _settings?.customApiKey || getServerSideKey(),
+      temperature: _settings?.customTemperature || 0.9,
+      model: _settings?.customModelName || GPT_35_TURBO,
+    };
+
+    // Only add maxTokens if it's a valid number and greater than 0
+    if (_settings?.customMaxTokens && _settings.customMaxTokens > 0) {
+      options.maxTokens = _settings.customMaxTokens;
+    }
+
+    // Add retries to reduce likelihood of errors
+    options.maxRetries = 3;
+
+    // Add custom endpoint if specified
+    if (_settings?.customEndPoint) {
+      options.endpoint = _settings.customEndPoint;
+    }
+
+    console.log("Creating Groq model with options:", {
+      model: options.model,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      maxRetries: options.maxRetries,
+      // Don't log the API key
+      apiKey: options.apiKey ? "[REDACTED]" : undefined
+    });
+
+    // Create the model normally without trying to monkey-patch its methods
+    return new ChatGroq(options);
+  } catch (error) {
+    console.error("Error creating Groq model:", error);
+    // Create with minimal settings as fallback
+    return new ChatGroq({
+      apiKey: getServerSideKey(),
+      model: GPT_35_TURBO
+    });
   }
-
-  const options = {
-    openAIApiKey: _settings?.customApiKey || getServerSideKey(),
-    temperature: _settings?.customTemperature || 0.9,
-    modelName: _settings?.customModelName || GPT_35_TURBO,
-    maxTokens: _settings?.customMaxTokens || 400,
-  };
-
-  const baseOptions = {
-    basePath: _settings?.customEndPoint || undefined,
-  };
-
-  return new OpenAI(options, baseOptions);
 };
 
-export const startGoalPrompt = new PromptTemplate({
-  template: `You are a task creation AI called AgentGPT. You must answer the "{customLanguage}" language. You are not a part of any system or device. You have the following objective "{goal}". Create a list of zero to three tasks to be completed by your AI system such that this goal is more closely, or completely reached. You have access to google search for tasks that require current events or small searches. Return the response as a formatted ARRAY of strings that can be used in JSON.parse(). Example: ["{{TASK-1}}", "{{TASK-2}}"].`,
-  inputVariables: ["goal", "customLanguage"],
-});
+export const startGoalPrompt = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You are a task creation AI called AgentGPT. You must answer the "{customLanguage}" language.
 
-export const analyzeTaskPrompt = new PromptTemplate({
-  template: `You have the following higher level objective "{goal}". You currently are focusing on the following task: "{task}". Based on this information, evaluate what the best action to take is strictly from the list of actions: {actions}. You should use 'search' only for research about current events where "arg" is a simple clear search query based on the task only. Use "reason" for all other actions. Return the response as an object of the form {{ "action": "string", "arg": "string" }} that can be used in JSON.parse() and NOTHING ELSE.`,
-  inputVariables: ["goal", "actions", "task"],
-});
+Your job is to create a list of tasks to help achieve a goal, returning ONLY a JSON array of strings that can be parsed with JSON.parse().
 
-export const executeTaskPrompt = new PromptTemplate({
-  template:
-    'Answer in the "{customLanguage}" language. Given the following overall objective `{goal}` and the following sub-task, `{task}`. Perform the task in a detailed manner. If coding is required, provide code in markdown',
-  inputVariables: ["goal", "task", "customLanguage"],
-});
+Important instructions:
+1. Do NOT include any explanations or additional text
+2. ONLY include the raw JSON array in your response, nothing else
+3. Format must be precisely ["Task 1", "Task 2", "Task 3"]
+4. If the goal is very simple, you can return fewer tasks or even an empty array []
 
-export const createTasksPrompt = new PromptTemplate({
-  template:
-    'You are an AI task creation agent. You must answer in the "{customLanguage}" language. You have the following objective `{goal}`. You have the following incomplete tasks `{tasks}` and have just executed the following task `{lastTask}` and received the following result `{result}`. Based on this, create a new task to be completed by your AI system ONLY IF NEEDED such that your goal is more closely reached or completely reached. Return the response as an array of strings that can be used in JSON.parse() and NOTHING ELSE.',
-  inputVariables: ["goal", "tasks", "lastTask", "result", "customLanguage"],
-});
+OBJECTIVE: "{goal}"
 
-export const summarizeSearchSnippets = new PromptTemplate({
-  template: `Summarize the following snippets "{snippets}" from google search results filling in information where necessary. This summary should answer the following query: "{query}" with the following goal "{goal}" in mind. Return the summary as a string. Do not show you are summarizing.`,
-  inputVariables: ["goal", "query", "snippets"],
-});
+RESPONSE FORMAT EXAMPLE:
+["Research current weather patterns", "Analyze historical climate data", "Create visualization of findings"]`
+  ]
+]);
+
+export const analyzeTaskPrompt = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You are a task analysis AI that determines the best action to take for a given task.
+
+OBJECTIVE: "{goal}"
+CURRENT TASK: "{task}"
+AVAILABLE ACTIONS: {actions}
+
+Important instructions:
+1. Evaluate whether the task requires searching for current events (use 'search') or can be done with reasoning (use 'reason')
+2. If using 'search', provide a clear, concise search query as the "arg" value
+3. Return ONLY a JSON object in this exact format: {"action": "reason|search", "arg": "string"}
+4. Do NOT include any explanations, comments, or additional text
+
+EXAMPLE RESPONSE FOR REASONING:
+{"action": "reason", "arg": "The task requires logical deduction"}
+
+EXAMPLE RESPONSE FOR SEARCHING:
+{"action": "search", "arg": "current inflation rate 2025"}`
+  ]
+]);
+
+export const executeTaskPrompt = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `Answer in the "{customLanguage}" language. Given the following overall objective \`{goal}\` and the following sub-task, \`{task}\`. Perform the task in a detailed manner. If coding is required, provide code in markdown`
+  ]
+]);
+
+export const createTasksPrompt = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You are an AI task creation agent. You must answer in the "{customLanguage}" language.
+
+Your job is to analyze the current state and create new tasks if needed, returning ONLY a JSON array of strings that can be parsed with JSON.parse().
+
+OBJECTIVE: "{goal}"
+INCOMPLETE TASKS: {tasks}
+LAST COMPLETED TASK: "{lastTask}"
+RESULT OF LAST TASK: "{result}"
+
+Important instructions:
+1. Do NOT include any explanations or additional text
+2. ONLY include the raw JSON array in your response, nothing else
+3. Format must be precisely ["New Task 1", "New Task 2"]
+4. If no new tasks are needed, return an empty array []
+5. Only create new tasks that build upon completed work and help achieve the goal
+
+RESPONSE FORMAT EXAMPLE:
+["Research more about X", "Create a plan for Y", "Implement Z"]`
+  ]
+]);
+
+export const summarizeSearchSnippets = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `Summarize the following snippets "{snippets}" from google search results filling in information where necessary. This summary should answer the following query: "{query}" with the following goal "{goal}" in mind. Return the summary as a string. Do not show you are summarizing.`
+  ]
+]);

@@ -1,4 +1,5 @@
 type Constructor<T> = new (...args: unknown[]) => T;
+import { safeParseJSON } from './error-recovery';
 
 /* Check whether array is of the specified type */
 export const isArrayOfType = <T>(
@@ -17,6 +18,7 @@ export const isArrayOfType = <T>(
   );
 };
 
+// Keep the rest of your existing helper functions below
 export const removeTaskPrefix = (input: string): string => {
   // Regular expression to match task prefixes. Consult tests to understand regex
   const prefixPattern =
@@ -30,10 +32,57 @@ export const extractTasks = (
   text: string,
   completedTasks: string[]
 ): string[] => {
-  return extractArray(text)
-    .filter(realTasksFilter)
-    .filter((task) => !(completedTasks || []).includes(task))
-    .map(removeTaskPrefix);
+  // Clean the input text first
+  const cleanedText = text.trim();
+
+  console.log("Attempting to extract tasks from:", cleanedText);
+
+  try {
+    // First try direct JSON parsing if it looks like JSON
+    if (cleanedText.startsWith('[') && cleanedText.endsWith(']')) {
+      try {
+        const parsed = safeParseJSON<string[]>(cleanedText, []);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter(item => typeof item === 'string')
+            .filter(realTasksFilter)
+            .filter((task) => !(completedTasks || []).includes(task))
+            .map(removeTaskPrefix);
+        }
+      } catch (e) {
+        console.log("Direct JSON parse failed:", e);
+      }
+    }
+
+    // Then try the regex extraction approach
+    const extractedArray = extractArray(cleanedText);
+    return extractedArray
+      .filter(realTasksFilter)
+      .filter((task) => !(completedTasks || []).includes(task))
+      .map(removeTaskPrefix);
+
+  } catch (e) {
+    console.error("Task extraction failed:", e);
+
+    // Fallback: Try to extract any lines that look like tasks
+    const lines = cleanedText.split('\n');
+    const potentialTasks = lines
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .filter(line => !line.startsWith('[') && !line.endsWith(']'))
+      .filter(line => !line.includes('objective') && !line.toLowerCase().includes('goal'))
+      .filter(realTasksFilter)
+      .filter((task) => !(completedTasks || []).includes(task))
+      .map(removeTaskPrefix);
+
+    if (potentialTasks.length > 0) {
+      console.log("Using fallback task extraction, found:", potentialTasks);
+      return potentialTasks;
+    }
+
+    // If we really can't find any tasks, return an empty array
+    return [];
+  }
 };
 
 export const extractArray = (inputStr: string): string[] => {
@@ -45,7 +94,7 @@ export const extractArray = (inputStr: string): string[] => {
   if (match && match[0]) {
     try {
       // Parse the matched string to get the array
-      return JSON.parse(match[0]) as string[];
+      return safeParseJSON<string[]>(match[0], []);
     } catch (error) {
       console.error("Error parsing the matched array:", error);
     }

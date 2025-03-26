@@ -44,7 +44,8 @@ export const SettingsDialog: React.FC<{
   };
 
   const keyIsValid = (key: string | undefined) => {
-    const pattern = /^(sk-[a-zA-Z0-9]{48}|[a-fA-F0-9]{32})$/;
+    // Updated to recognize Groq API keys that start with "gsk_"
+    const pattern = /^(gsk_[a-zA-Z0-9]{48}|[a-fA-F0-9]{32})$/;
     return key && pattern.test(key);
   };
 
@@ -60,7 +61,7 @@ export const SettingsDialog: React.FC<{
     if (!isGuestMode && !keyIsValid(settings.customApiKey)) {
       alert(
         t(
-          "Key is invalid, please ensure that you have set up billing in your OpenAI account!"
+          "Key is invalid, please ensure that you have set up your Groq account and obtained a valid API key!"
         )
       );
       return;
@@ -195,15 +196,13 @@ export const SettingsDialog: React.FC<{
         &nbsp;
         <Trans i18nKey="gpt4-notice" ns="settings">
           <b>
-            To use the GPT-4 model, you need to also provide the API key for
-            GPT-4. You can request for it&nbsp;
+            To use the Llama 3 70B model, you need to also provide a Groq API key. You can get one by signing up at&nbsp;
             <a
-              href="https://openai.com/waitlist/gpt-4-api"
+              href="https://console.groq.com/keys"
               className="text-blue-500"
             >
-              here
+              console.groq.com
             </a>
-            . (ChatGPT Plus subscription will not work)
           </b>
         </Trans>
       </p>
@@ -215,7 +214,7 @@ export const SettingsDialog: React.FC<{
               <span className="ml-2">{t("key")}</span>
             </>
           }
-          placeholder={"sk-..."}
+          placeholder={"gsk_..."}
           value={settings.customApiKey}
           onChange={(e) => updateSettings("customApiKey", e.target.value)}
           type="password"
@@ -254,13 +253,12 @@ export const SettingsDialog: React.FC<{
       </div>
       <Trans i18nKey="api-key-notice" ns="settings">
         <strong className="mt-10">
-          NOTE: To get a key, sign up for an OpenAI account and visit the
-          following
+          NOTE: To get a key, sign up for a Groq account and visit the
           <a
-            href="https://platform.openai.com/account/api-keys"
+            href="https://console.groq.com/keys"
             className="text-blue-500"
           >
-            link.
+            API Keys page.
           </a>
           This key is only used in the current browser session
         </strong>
