@@ -23,37 +23,32 @@ export const createModel = (settings: ModelSettings) => {
       _settings = undefined;
     }
 
-    // Define the basic options that are definitely supported
-    const options: Record<string, any> = {
+    // Create the model with required properties
+    const model = new ChatGroq({
       apiKey: _settings?.customApiKey || getServerSideKey(),
-      temperature: _settings?.customTemperature || 0.9,
       model: _settings?.customModelName || GPT_35_TURBO,
-    };
-
-    // Only add maxTokens if it's a valid number and greater than 0
-    if (_settings?.customMaxTokens && _settings.customMaxTokens > 0) {
-      options.maxTokens = _settings.customMaxTokens;
-    }
-
-    // Add retries to reduce likelihood of errors
-    options.maxRetries = 3;
-
-    // Add custom endpoint if specified
-    if (_settings?.customEndPoint) {
-      options.endpoint = _settings.customEndPoint;
-    }
-
-    console.log("Creating Groq model with options:", {
-      model: options.model,
-      temperature: options.temperature,
-      maxTokens: options.maxTokens,
-      maxRetries: options.maxRetries,
-      // Don't log the API key
-      apiKey: options.apiKey ? "[REDACTED]" : undefined
+      temperature: _settings?.customTemperature || 0.9,
+      maxRetries: 3,
+      ..._settings?.customMaxTokens && _settings.customMaxTokens > 0
+        ? { maxTokens: _settings.customMaxTokens }
+        : {},
+      ..._settings?.customEndPoint
+        ? { endpoint: _settings.customEndPoint }
+        : {}
     });
 
-    // Create the model normally without trying to monkey-patch its methods
-    return new ChatGroq(options);
+    console.log("Creating Groq model with options:", {
+      model: _settings?.customModelName || GPT_35_TURBO,
+      temperature: _settings?.customTemperature || 0.9,
+      maxTokens: _settings?.customMaxTokens && _settings.customMaxTokens > 0
+        ? _settings.customMaxTokens
+        : undefined,
+      maxRetries: 3,
+      // Don't log the API key
+      apiKey: (_settings?.customApiKey || getServerSideKey()) ? "[REDACTED]" : undefined
+    });
+
+    return model;
   } catch (error) {
     console.error("Error creating Groq model:", error);
     // Create with minimal settings as fallback
