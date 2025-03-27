@@ -14,6 +14,7 @@ import { Serper } from "./custom-tools/serper";
 import { AIMessage } from "@langchain/core/messages";
 import { dbCacheService } from "./db-cache-service";
 import { withRetry } from "../utils/error-recovery";
+import { ChatPromptTemplate } from "@langchain/core/prompts";
 
 // Type for chain input to improve type safety
 type ChainInput = Record<string, any>;
@@ -85,42 +86,65 @@ function extractTextContent(response: any): string {
 
 // Safely invoke a chain with caching and error handling
 async function safeInvoke(chain: any, input: ChainInput, defaultValue = ""): Promise<string> {
-  try {
-    // Create a cache key for this request
-    const cacheKey = dbCacheService.createCacheKey(input);
+  let result;
 
-    // Check if we have a cached response
-    const cachedResponse = await dbCacheService.get(cacheKey);
-    if (cachedResponse) {
-      console.log("Using cached response");
-      return cachedResponse;
+  try {
+    // Add time context to input if not already present
+    const enhancedInput = {
+      ...input,  // Keep all original properties
+      timeContext: getCurrentTimeContext(),
+    };
+
+    // Create a cache key for this request
+    const cacheKey = dbCacheService.createCacheKey(enhancedInput);
+
+    // Try to get from cache first
+    try {
+      const cachedResponse = await dbCacheService.get(cacheKey);
+      if (cachedResponse) {
+        console.log("Using cached response");
+        return cachedResponse;
+      }
+    } catch (cacheError) {
+      console.error("Cache lookup error, proceeding without cache:", cacheError);
+
+      // Force memory-only mode for future operations
+      if (cacheError instanceof TypeError && cacheError.message.includes("this.data is undefined")) {
+        dbCacheService.forceMemoryOnlyMode();
+      }
     }
 
-    // No cache hit, invoke the chain
-    console.log("Cache miss, invoking chain");
+    console.log("Cache miss or error, invoking chain directly");
 
-    // Use withRetry for better resilience
-    let result;
+    // Main approach: Try running the chain directly
     try {
-      result = await withRetry(() => chain.invoke(input), 3, 1000);
-    } catch (invokeError) {
-      console.error("Error in chain invocation, trying alternative approach:", invokeError);
+      result = await withRetry(() => chain.invoke(enhancedInput), 3, 1000);
+    } catch (chainError) {
+      console.error("Chain invocation failed, using fallback approach:", chainError);
 
-      // Alternative approach if the chain invocation fails
+      // Fallback approach: Use direct model invocation
       try {
-        const model = createModel(input.modelSettings || input);
+        const modelSettings = input.modelSettings || input;
+        const model = createModel(modelSettings);
+
+        const timeContext = getCurrentTimeContext();
+        const systemMessage = `
+        Current time context: Today is ${timeContext.fullDate}, the current year is ${timeContext.year}.
+        Please respond to the following query with accurate, up-to-date information:
+        `;
+
         const formattedPrompt = typeof input === 'string'
           ? input
           : JSON.stringify(input, null, 2);
 
         const messages = [
-          { role: "system", content: "Please respond to the following:" },
+          { role: "system", content: systemMessage },
           { role: "user", content: formattedPrompt }
         ];
 
         result = await model.invoke(messages);
       } catch (modelError) {
-        console.error("Alternative approach also failed:", modelError);
+        console.error("All approaches failed:", modelError);
         return defaultValue;
       }
     }
@@ -128,12 +152,27 @@ async function safeInvoke(chain: any, input: ChainInput, defaultValue = ""): Pro
     // Extract text content from the result
     const extractedResult = typeof result === 'string' ? result : extractTextContent(result);
 
-    // Cache the result for future use
-    await dbCacheService.set(cacheKey, JSON.stringify(input), extractedResult);
+    // Try to cache the result, but don't let caching errors affect the response
+    try {
+      await dbCacheService.set(cacheKey, JSON.stringify(enhancedInput), extractedResult);
+    } catch (cacheError) {
+      console.error("Failed to cache result, but continuing:", cacheError);
+
+      // Force memory-only mode for future operations
+      if (cacheError instanceof TypeError && cacheError.message.includes("this.data is undefined")) {
+        dbCacheService.forceMemoryOnlyMode();
+      }
+    }
 
     return extractedResult;
   } catch (error: any) {
-    console.error("Error in safeInvoke:", error);
+    console.error("Critical error in safeInvoke:", error);
+
+    // Force memory-only mode if we hit the specific error
+    if (error instanceof TypeError && error.message.includes("this.data is undefined")) {
+      dbCacheService.forceMemoryOnlyMode();
+    }
+
     return defaultValue;
   }
 }
@@ -185,12 +224,47 @@ async function analyzeTaskAgent(
   try {
     console.log("Analyzing task with parameters:", { goal, task });
 
+    // Get current time context
+    const timeContext = getCurrentTimeContext();
+    console.log("Current time context:", timeContext);
+
     const actions = ["reason", "search"];
     const model = createModel(modelSettings);
     const outputParser = new StringOutputParser();
 
+    // Enhanced prompt with time context awareness
+    const timeAwarePrompt = ChatPromptTemplate.fromMessages([
+      [
+        "system",
+        `You are a task analysis AI that determines the best action to take for a given task.
+
+CURRENT TIME CONTEXT:
+- Today's date: ${timeContext.fullDate}
+- Current year: ${timeContext.year}
+- Current time: ${timeContext.time} ${timeContext.timezone}
+
+OBJECTIVE: "{goal}"
+CURRENT TASK: "{task}"
+AVAILABLE ACTIONS: {actions}
+
+Important instructions:
+1. Always consider the current time context (${timeContext.year}) when analyzing the task
+2. For questions about current events, news, recent elections, or time-sensitive information, always use 'search'
+3. For factual or historical information that doesn't change over time, you can use 'reason'
+4. If using 'search', provide a clear, concise search query as the "arg" value
+5. Return ONLY a JSON object in this exact format: {{\"action\": \"reason|search\", \"arg\": \"string\"}}
+6. Do NOT include any explanations, comments, or additional text
+
+EXAMPLE RESPONSE FOR REASONING:
+{{\"action\": \"reason\", \"arg\": \"The task requires logical deduction\"}}
+
+EXAMPLE RESPONSE FOR SEARCHING:
+{{\"action\": \"search\", \"arg\": \"current inflation rate ${timeContext.year}\"}}`
+      ]
+    ]);
+
     const chain = RunnableSequence.from([
-      analyzeTaskPrompt,
+      timeAwarePrompt,
       model,
       outputParser,
     ]);
@@ -223,6 +297,21 @@ async function analyzeTaskAgent(
     console.error("Error in analyzeTaskAgent:", errorMessage);
     return DefaultAnalysis;
   }
+}
+
+// Helper function to get current time context
+function getCurrentTimeContext() {
+  const now = new Date();
+  return {
+    time: now.toLocaleTimeString(),
+    dayOfWeek: now.toLocaleDateString('en-US', { weekday: 'long' }),
+    fullDate: now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    day: now.getDate(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    readableTime: now.toLocaleString()
+  };
 }
 
 export type Analysis = {
@@ -369,7 +458,8 @@ interface AgentService {
   ) => Promise<string[]>;
 }
 
-const OpenAIAgentService: AgentService = {
+// Renamed from OpenAIAgentService to GroqAgentService to reflect actual implementation
+const GroqAgentService: AgentService = {
   startGoalAgent: startGoalAgent,
   analyzeTaskAgent: analyzeTaskAgent,
   executeTaskAgent: executeTaskAgent,
@@ -419,4 +509,4 @@ const MockAgentService: AgentService = {
 
 export default env.NEXT_PUBLIC_FF_MOCK_MODE_ENABLED
   ? MockAgentService
-  : OpenAIAgentService;
+  : GroqAgentService;

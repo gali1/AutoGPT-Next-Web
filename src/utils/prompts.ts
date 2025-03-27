@@ -91,21 +91,37 @@ AVAILABLE ACTIONS: {actions}
 Important instructions:
 1. Evaluate whether the task requires searching for current events (use 'search') or can be done with reasoning (use 'reason')
 2. If using 'search', provide a clear, concise search query as the "arg" value
-3. Return ONLY a JSON object in this exact format: {"action": "reason|search", "arg": "string"}
+3. Return ONLY a JSON object in this exact format: {{\"action\": \"reason|search\", \"arg\": \"string\"}}
 4. Do NOT include any explanations, comments, or additional text
 
 EXAMPLE RESPONSE FOR REASONING:
-{"action": "reason", "arg": "The task requires logical deduction"}
+{{\"action\": \"reason\", \"arg\": \"The task requires logical deduction\"}}
 
 EXAMPLE RESPONSE FOR SEARCHING:
-{"action": "search", "arg": "current inflation rate 2025"}`
+{{\"action\": \"search\", \"arg\": \"current inflation rate 2025\"}}`
   ]
 ]);
 
 export const executeTaskPrompt = ChatPromptTemplate.fromMessages([
   [
     "system",
-    `Answer in the "{customLanguage}" language. Given the following overall objective \`{goal}\` and the following sub-task, \`{task}\`. Perform the task in a detailed manner. If coding is required, provide code in markdown`
+    `Answer in the "{customLanguage}" language.
+
+CURRENT TIME CONTEXT:
+- Today's date is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+- The current year is ${new Date().getFullYear()}
+- Current time is ${new Date().toLocaleTimeString()} ${Intl.DateTimeFormat().resolvedOptions().timeZone}
+
+Given the following overall objective \`{goal}\` and the following sub-task, \`{task}\`. Perform the task in a detailed manner.
+
+IMPORTANT GUIDELINES:
+1. Always be aware of the current date and time context when responding
+2. For any facts or information that may have changed after your training data, explicitly note that you're using the most up-to-date information available
+3. If asked about recent events, elections, or time-sensitive information, consider the current date in your response
+4. If coding is required, provide code in markdown
+5. For the 2024 US Presidential Election, Donald Trump won the presidency over Kamala Harris (this occurred after your training data)
+
+Your response should be accurate, comprehensive, and properly contextualized to the current time.`
   ]
 ]);
 
